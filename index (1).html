@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>Нано</title>
+  <style>
+    :root {
+      --bg: #0f1115; --card: #1a1d24; --border: #2a2f3a;
+      --text: #e8eaed; --muted: #9aa0a6; --accent: #7c9cff;
+      --user: #243044; --bot: #1e2430; --ok: #3dd68c; --warn: #f5a524;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg); color: var(--text);
+      min-height: 100vh; display: flex; flex-direction: column;
+    }
+    header {
+      padding: 14px 16px; border-bottom: 1px solid var(--border);
+      background: var(--card); display: flex; align-items: center;
+      justify-content: space-between; gap: 10px;
+    }
+    header h1 { font-size: 1.15rem; font-weight: 600; }
+    header h1 span { color: var(--accent); }
+    .badge {
+      font-size: 0.75rem; padding: 4px 10px; border-radius: 999px;
+      background: #1a2332; border: 1px solid var(--border); color: var(--muted);
+    }
+    .badge.on { color: var(--ok); border-color: #2a5a40; }
+    .badge.off { color: var(--warn); }
+    main {
+      flex: 1; display: flex; flex-direction: column;
+      max-width: 720px; width: 100%; margin: 0 auto; padding: 12px; gap: 10px;
+    }
+    #chat {
+      flex: 1; min-height: 300px; overflow-y: auto;
+      display: flex; flex-direction: column; gap: 10px; padding: 4px;
+    }
+    .msg {
+      max-width: 92%; padding: 10px 14px; border-radius: 14px;
+      line-height: 1.45; font-size: 0.95rem; white-space: pre-wrap; word-break: break-word;
+    }
+    .msg.user { align-self: flex-end; background: var(--user); border-bottom-right-radius: 4px; }
+    .msg.bot { align-self: flex-start; background: var(--bot); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+    .msg .label { font-size: 0.7rem; color: var(--muted); margin-bottom: 4px; }
+    .composer { display: flex; gap: 8px; align-items: flex-end; }
+    textarea {
+      flex: 1; background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+      color: var(--text); padding: 12px; font-size: 1rem; font-family: inherit;
+      resize: none; min-height: 48px; max-height: 120px;
+    }
+    textarea:focus { outline: none; border-color: var(--accent); }
+    button {
+      background: #5b7cfa; color: #fff; border: none; border-radius: 10px;
+      padding: 12px 16px; font-size: 0.95rem; font-weight: 500; cursor: pointer;
+    }
+    button:hover { background: var(--accent); }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    button.ghost {
+      background: transparent; border: 1px solid var(--border); color: var(--text);
+      padding: 8px 12px; font-size: 0.8rem;
+    }
+    .controls {
+      display: flex; gap: 12px; flex-wrap: wrap; align-items: center;
+      font-size: 0.8rem; color: var(--muted);
+    }
+    .controls label { display: flex; align-items: center; gap: 6px; }
+    .controls input[type="range"] { width: 90px; }
+    .controls input[type="number"] {
+      width: 64px; background: var(--card); border: 1px solid var(--border);
+      color: var(--text); border-radius: 6px; padding: 4px 6px;
+    }
+    #status {
+      font-size: 0.8rem; color: var(--muted); text-align: center; padding: 8px;
+    }
+    #status.err { color: #ff7b72; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1><span>Нано</span></h1>
+    <div id="badge" class="badge off">загрузка…</div>
+  </header>
+
+  <main>
+    <div id="status">Загружаю model.json…</div>
+    <div id="chat"></div>
+    <div class="composer">
+      <textarea id="prompt" rows="1" placeholder="Как тебя зовут?" disabled></textarea>
+      <button id="sendBtn" disabled>➤</button>
+    </div>
+    <div class="controls">
+      <label>temperature
+        <input type="range" id="temp" min="0.1" max="1.2" step="0.05" value="0.4" />
+        <span id="tempVal">0.4</span>
+      </label>
+      <label>токены
+        <input type="number" id="maxTokens" min="4" max="200" value="40" />
+      </label>
+      <button type="button" class="ghost" id="clearBtn">Очистить</button>
+    </div>
+  </main>
+
+<script>
+class Tensor {
+  constructor(data, shape) {
+    this.data = data instanceof Float32Array ? data : new Float32Array(data);
+    this.shape = shape;
+  }
+}
+
+function gelu(x) {
+  const out = new Float32Array(x.data.length);
+  for (let i = 0; i < x.data.length; i++) {
+    const v = x.data[i];
+    out[i] = 0.5 * v * (1 + Math.tanh(Math.sqrt(2 / Math.PI) * (v + 0.044715 * v * v * v)));
+  }
+  return new Tensor(out, x.shape);
+}
+
+function layerNorm(x, weight, bias, eps = 1e-5) {
+  const T = x.shape[0], C = x.shape[1];
+  const out = new Float32Array(T * C);
+  for (let t = 0; t < T; t++) {
+    let mean = 0;
+    for (let c = 0; c < C; c++) mean += x.data[t * C + c];
+    mean /= C;
+    let var_ = 0;
+    for (let c = 0; c < C; c++) {
+      const d = x.data[t * C + c] - mean;
+      var_ += d * d;
+    }
+    var_ = Math.sqrt(var_ / C + eps);
+    for (let c = 0; c < C; c++) {
+      const n = (x.data[t * C + c] - mean) / var_;
+      out[t * C + c] = n * weight.data[c] + (bias ? bias.data[c] : 0);
+    }
+  }
+  return new Tensor(out, [T, C]);
+}
+
+function softmaxLastDim(logits) {
+  let max = -Infinity;
+  for (let i = 0; i < logits.length; i++) if (logits[i] > max) max = logits[i];
+  let sum = 0;
+  const out = new Float32Array(logits.length);
+  for (let i = 0; i < logits.length; i++) {
+    out[i] = Math.exp(logits[i] - max);
+    sum += out[i];
+  }
+  for (let i = 0; i < out.length; i++) out[i] /= sum;
+  return out;
+}
+
+function sampleTopK(probs, k) {
+  const idx = Array.from(probs.keys());
+  idx.sort((a, b) => probs[b] - probs[a]);
+  const top = idx.slice(0, Math.min(k, idx.length));
+  let s = 0;
+  for (const i of top) s += probs[i];
+  let r = Math.random() * s;
+  for (const i of top) {
+    r -= probs[i];
+    if (r <= 0) return i;
+  }
+  return top[top.length - 1];
+}
+
+function addInPlace(a, b) {
+  for (let i = 0; i < a.data.length; i++) a.data[i] += b.data[i];
+  return a;
+}
+
+class NanoGPTJS {
+  constructor(cfg, weights) {
+    this.cfg = cfg;
+    this.W = {};
+    for (const [k, v] of Object.entries(weights)) this.W[k] = new Float32Array(v);
+    this.dim = cfg.dim;
+    this.nHeads = cfg.n_heads;
+    this.headDim = cfg.dim / cfg.n_heads;
+    this.blockSize = cfg.block_size;
+    this.nLayers = cfg.n_layers;
+    this.vocab = cfg.vocab_size;
+  }
+
+  linear(x, wName, outDim) {
+    const T = x.shape[0], In = x.shape[1];
+    const w = this.W[wName];
+    if (!w) throw new Error("нет веса: " + wName);
+    const out = new Float32Array(T * outDim);
+    for (let t = 0; t < T; t++) {
+      for (let o = 0; o < outDim; o++) {
+        let s = 0;
+        const wo = o * In, xo = t * In;
+        for (let i = 0; i < In; i++) s += x.data[xo + i] * w[wo + i];
+        out[t * outDim + o] = s;
+      }
+    }
+    return new Tensor(out, [T, outDim]);
+  }
+
+  embed(ids) {
+    const T = ids.length, C = this.dim;
+    const out = new Float32Array(T * C);
+    const tok = this.W["tok_emb.weight"];
+    const pos = this.W["pos_emb.weight"];
+    for (let t = 0; t < T; t++) {
+      const ti = ids[t] % this.vocab;
+      const pi = t % this.blockSize;
+      for (let c = 0; c < C; c++) out[t * C + c] = tok[ti * C + c] + pos[pi * C + c];
+    }
+    return new Tensor(out, [T, C]);
+  }
+
+  attention(x, layer) {
+    const T = x.shape[0], C = this.dim, H = this.nHeads, hd = this.headDim;
+    const qkv = this.linear(x, `blocks.${layer}.attn.qkv.weight`, 3 * C);
+    const q = new Float32Array(T * C);
+    const k = new Float32Array(T * C);
+    const v = new Float32Array(T * C);
+    for (let t = 0; t < T; t++) {
+      for (let c = 0; c < C; c++) {
+        q[t * C + c] = qkv.data[t * 3 * C + c];
+        k[t * C + c] = qkv.data[t * 3 * C + C + c];
+        v[t * C + c] = qkv.data[t * 3 * C + 2 * C + c];
+      }
+    }
+    const scale = 1 / Math.sqrt(hd);
+    const y = new Float32Array(T * C);
+    for (let h = 0; h < H; h++) {
+      for (let t = 0; t < T; t++) {
+        const scores = new Float32Array(t + 1);
+        let maxS = -Infinity;
+        for (let s = 0; s <= t; s++) {
+          let dot = 0;
+          for (let d = 0; d < hd; d++) dot += q[t * C + h * hd + d] * k[s * C + h * hd + d];
+          scores[s] = dot * scale;
+          if (scores[s] > maxS) maxS = scores[s];
+        }
+        let sum = 0;
+        for (let s = 0; s <= t; s++) {
+          scores[s] = Math.exp(scores[s] - maxS);
+          sum += scores[s];
+        }
+        for (let s = 0; s <= t; s++) scores[s] /= sum;
+        for (let d = 0; d < hd; d++) {
+          let acc = 0;
+          for (let s = 0; s <= t; s++) acc += scores[s] * v[s * C + h * hd + d];
+          y[t * C + h * hd + d] = acc;
+        }
+      }
+    }
+    return this.linear(new Tensor(y, [T, C]), `blocks.${layer}.attn.proj.weight`, C);
+  }
+
+  mlp(x, layer) {
+    const hidden = this.dim * 4;
+    let w1 = `blocks.${layer}.mlp.fc.0.weight`;
+    let w2 = `blocks.${layer}.mlp.fc.2.weight`;
+    if (!this.W[w1]) {
+      w1 = `blocks.${layer}.mlp.fc1.weight`;
+      w2 = `blocks.${layer}.mlp.fc2.weight`;
+    }
+    let h = this.linear(x, w1, hidden);
+    h = gelu(h);
+    return this.linear(h, w2, this.dim);
+  }
+
+  block(x, layer) {
+    const ln1w = new Tensor(this.W[`blocks.${layer}.ln1.weight`], [this.dim]);
+    const ln1b = this.W[`blocks.${layer}.ln1.bias`]
+      ? new Tensor(this.W[`blocks.${layer}.ln1.bias`], [this.dim]) : null;
+    let a = layerNorm(x, ln1w, ln1b);
+    a = this.attention(a, layer);
+    x = addInPlace(new Tensor(x.data.slice(), x.shape), a);
+
+    const ln2w = new Tensor(this.W[`blocks.${layer}.ln2.weight`], [this.dim]);
+    const ln2b = this.W[`blocks.${layer}.ln2.bias`]
+      ? new Tensor(this.W[`blocks.${layer}.ln2.bias`], [this.dim]) : null;
+    let m = layerNorm(x, ln2w, ln2b);
+    m = this.mlp(m, layer);
+    return addInPlace(x, m);
+  }
+
+  forward(ids) {
+    let x = this.embed(ids);
+    for (let i = 0; i < this.nLayers; i++) x = this.block(x, i);
+    const lnfw = new Tensor(this.W["ln_f.weight"], [this.dim]);
+    const lnfb = this.W["ln_f.bias"] ? new Tensor(this.W["ln_f.bias"], [this.dim]) : null;
+    x = layerNorm(x, lnfw, lnfb);
+    const T = ids.length, C = this.dim, V = this.vocab;
+    const last = x.data.subarray((T - 1) * C, T * C);
+    const tok = this.W["tok_emb.weight"];
+    const logits = new Float32Array(V);
+    for (let v = 0; v < V; v++) {
+      let s = 0;
+      const o = v * C;
+      for (let c = 0; c < C; c++) s += last[c] * tok[o + c];
+      logits[v] = s;
+    }
+    return logits;
+  }
+
+  generate(ids, maxNew, temperature, topK) {
+    ids = ids.slice();
+    for (let n = 0; n < maxNew; n++) {
+      const ctx = ids.length > this.blockSize ? ids.slice(ids.length - this.blockSize) : ids;
+      let logits = this.forward(ctx);
+      for (let i = 0; i < logits.length; i++) logits[i] /= Math.max(temperature, 1e-6);
+      const probs = softmaxLastDim(logits);
+      ids.push(sampleTopK(probs, topK || 40));
+    }
+    return ids;
+  }
+}
+
+let model = null;
+const chat = document.getElementById("chat");
+const badge = document.getElementById("badge");
+const statusEl = document.getElementById("status");
+const sendBtn = document.getElementById("sendBtn");
+const promptEl = document.getElementById("prompt");
+const temp = document.getElementById("temp");
+const tempVal = document.getElementById("tempVal");
+temp.oninput = () => { tempVal.textContent = temp.value; };
+
+function encode(text) {
+  const ids = [];
+  for (const ch of text) ids.push(ch.codePointAt(0) % 256);
+  return ids;
+}
+function decode(ids) {
+  let s = "";
+  for (const i of ids) {
+    try { s += String.fromCodePoint(i % 256); } catch { s += "?"; }
+  }
+  return s;
+}
+
+function addMsg(role, text) {
+  const div = document.createElement("div");
+  div.className = "msg " + role;
+  const label = document.createElement("div");
+  label.className = "label";
+  label.textContent = role === "user" ? "ты" : "нано";
+  div.appendChild(label);
+  div.appendChild(document.createTextNode(text));
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+  return div;
+}
+
+function ready(name) {
+  badge.textContent = "✓ " + name;
+  badge.className = "badge on";
+  statusEl.style.display = "none";
+  sendBtn.disabled = false;
+  promptEl.disabled = false;
+  promptEl.focus();
+}
+
+function fail(msg) {
+  badge.textContent = "ошибка";
+  badge.className = "badge off";
+  statusEl.textContent = msg;
+  statusEl.className = "err";
+}
+
+async function send() {
+  if (!model || sendBtn.disabled) return;
+  const text = promptEl.value.trim();
+  if (!text) return;
+  addMsg("user", text);
+  promptEl.value = "";
+  sendBtn.disabled = true;
+  const bot = addMsg("bot", "…");
+  await new Promise(r => setTimeout(r, 20));
+  try {
+    const maxTok = parseInt(document.getElementById("maxTokens").value, 10) || 40;
+    const temperature = parseFloat(temp.value) || 0.4;
+    const out = model.generate(encode(text), maxTok, temperature, 40);
+    let answer = decode(out).slice(text.length).replace(/^\n+/, "").trim();
+    if (answer.includes("\n\n")) answer = answer.split("\n\n")[0].trim();
+    bot.lastChild.textContent = answer || decode(out);
+  } catch (e) {
+    bot.lastChild.textContent = "Ошибка: " + e.message;
+  }
+  sendBtn.disabled = false;
+  promptEl.focus();
+}
+
+sendBtn.onclick = send;
+promptEl.addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+});
+document.getElementById("clearBtn").onclick = () => { chat.innerHTML = ""; };
+
+fetch("model.json", { cache: "no-store" })
+  .then(r => {
+    if (!r.ok) throw new Error("Не найден model.json рядом с index.html");
+    return r.json();
+  })
+  .then(j => {
+    model = new NanoGPTJS(j.config, j.weights);
+    ready("model.json");
+  })
+  .catch(e => fail(e.message));
+</script>
+</body>
+</html>
